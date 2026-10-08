@@ -1,0 +1,27 @@
+{
+  "name": "ytsync",
+  "version": "1.0.0",
+  "description": "Ultra-lightweight terminal-based synchronized YouTube music player",
+  "type": "module",
+  "bin": {
+    "ytsync": "./src/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GGTaha/ytsync.git"
+  },
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "keywords": [
+    "youtube",
+    "music",
+    "sync",
+    "terminal",
+    "mpv",
+    "radmin-vpn",
+    "peer-to-peer"
+  ],
+  "author": "GGTaha",
+  "license": "MIT"
+}

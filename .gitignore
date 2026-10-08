@@ -1,0 +1,17 @@
+# Binary executables (downloaded on-demand via start.bat / scripts/setup.ps1)
+bin/
+*.exe
+
+# User data and persistence (stats, listening history, favorites)
+data/
+
+# Log and temporary files
+*.tmp
+*.log
+*.7z
+.system_generated/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini
