@@ -2,10 +2,14 @@
 [CmdletBinding()]
 param (
     [switch]$Prompt = $false,
-    [string]$BinDir = "$PSScriptRoot\..\bin"
+    [string]$BinDir = ""
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $BinDir) {
+    $BinDir = Join-Path $PSScriptRoot "..\bin"
+}
 
 # Ensure destination directory exists
 if (-not (Test-Path -Path $BinDir)) {
@@ -18,10 +22,20 @@ $nodePath = Join-Path $BinDir "node.exe"
 $ytdlpPath = Join-Path $BinDir "yt-dlp.exe"
 $mpvPath = Join-Path $BinDir "mpv.exe"
 
+function Test-ValidBinary($path) {
+    if (-not (Test-Path $path)) { return $false }
+    $file = Get-Item $path -ErrorAction SilentlyContinue
+    if (-not $file -or $file.Length -lt 10240) {
+        Remove-Item $path -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    return $true
+}
+
 $missing = @()
-if (-not (Test-Path $nodePath)) { $missing += "Node.js (portable)" }
-if (-not (Test-Path $ytdlpPath)) { $missing += "yt-dlp (YouTube engine)" }
-if (-not (Test-Path $mpvPath)) { $missing += "MPV (audio player)" }
+if (-not (Test-ValidBinary $nodePath)) { $missing += "Node.js (portable)" }
+if (-not (Test-ValidBinary $ytdlpPath)) { $missing += "yt-dlp (YouTube engine)" }
+if (-not (Test-ValidBinary $mpvPath)) { $missing += "MPV (audio player)" }
 
 if ($missing.Count -eq 0) {
     Write-Host ""
@@ -30,9 +44,11 @@ if ($missing.Count -eq 0) {
     exit 0
 }
 
-Write-Host "`n ======================================================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host " ======================================================================" -ForegroundColor Cyan
 Write-Host "                    YTSync - Portable Binary Setup                      " -ForegroundColor Cyan
-Write-Host " ======================================================================`n" -ForegroundColor Cyan
+Write-Host " ======================================================================" -ForegroundColor Cyan
+Write-Host ""
 
 Write-Host " The following portable dependencies need to be configured:" -ForegroundColor Yellow
 foreach ($item in $missing) {
@@ -43,17 +59,18 @@ Write-Host ""
 if ($Prompt) {
     $choice = Read-Host " Would you like to automatically download them now? (Y/N)"
     if ($choice -notmatch '^(y|yes)$') {
-        Write-Host " Setup cancelled. Existing system tools will be used if available.`n" -ForegroundColor Yellow
+        Write-Host " Setup cancelled. Existing system tools will be used if available." -ForegroundColor Yellow
+        Write-Host ""
         exit 0
     }
 }
 
 # 1. Download Node.js portable
-if (-not (Test-Path $nodePath)) {
+if (-not (Test-ValidBinary $nodePath)) {
     Write-Host " [1/3] Downloading portable Node.js v22..." -ForegroundColor Cyan
     $nodeUrl = "https://nodejs.org/dist/v22.12.0/win-x64/node.exe"
     curl.exe -fLo "$nodePath" --progress-bar "$nodeUrl"
-    if (-not (Test-Path $nodePath)) {
+    if (-not (Test-ValidBinary $nodePath)) {
         Write-Host " [!] Failed to download Node.js" -ForegroundColor Red
         exit 1
     }
@@ -63,11 +80,12 @@ if (-not (Test-Path $nodePath)) {
 }
 
 # 2. Download yt-dlp
-if (-not (Test-Path $ytdlpPath)) {
-    Write-Host "`n [2/3] Downloading yt-dlp..." -ForegroundColor Cyan
+if (-not (Test-ValidBinary $ytdlpPath)) {
+    Write-Host ""
+    Write-Host " [2/3] Downloading yt-dlp..." -ForegroundColor Cyan
     $ytdlpUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
     curl.exe -fLo "$ytdlpPath" -L --progress-bar "$ytdlpUrl"
-    if (-not (Test-Path $ytdlpPath)) {
+    if (-not (Test-ValidBinary $ytdlpPath)) {
         Write-Host " [!] Failed to download yt-dlp" -ForegroundColor Red
         exit 1
     }
@@ -77,8 +95,9 @@ if (-not (Test-Path $ytdlpPath)) {
 }
 
 # 3. Download MPV
-if (-not (Test-Path $mpvPath)) {
-    Write-Host "`n [3/3] Downloading & extracting MPV..." -ForegroundColor Cyan
+if (-not (Test-ValidBinary $mpvPath)) {
+    Write-Host ""
+    Write-Host " [3/3] Downloading & extracting MPV..." -ForegroundColor Cyan
     $tempArchive = Join-Path $env:TEMP "mpv_ytsync_setup.7z"
     
     $mpvUrl = try {
@@ -104,7 +123,7 @@ if (-not (Test-Path $mpvPath)) {
     tar.exe -xf "$tempArchive" -C "$BinDir" mpv.exe
     Remove-Item -Force "$tempArchive" -ErrorAction SilentlyContinue
 
-    if (-not (Test-Path $mpvPath)) {
+    if (-not (Test-ValidBinary $mpvPath)) {
         Write-Host " [!] Failed to extract mpv.exe" -ForegroundColor Red
         exit 1
     }

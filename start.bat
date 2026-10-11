@@ -2,14 +2,33 @@
 setlocal
 cd /d "%~dp0"
 
+:: Check that project source files exist
+if not exist "%~dp0src\index.js" goto :missing_src
+
 :: Add bin folder to path for this session
 set "PATH=%~dp0bin;%PATH%"
 
-:: Check if all 3 portable binaries exist in bin\
+:: Check if all 3 portable binaries exist and are non-empty
 if not exist "%~dp0bin\node.exe" goto :missing_binaries
 if not exist "%~dp0bin\mpv.exe" goto :missing_binaries
 if not exist "%~dp0bin\yt-dlp.exe" goto :missing_binaries
+for %%F in ("%~dp0bin\node.exe") do if %%~zF LSS 10240 goto :missing_binaries
+for %%F in ("%~dp0bin\mpv.exe") do if %%~zF LSS 10240 goto :missing_binaries
+for %%F in ("%~dp0bin\yt-dlp.exe") do if %%~zF LSS 10240 goto :missing_binaries
 goto :run_app
+
+:missing_src
+echo.
+echo ======================================================================
+echo  [!] Error: src\index.js was not found in:
+echo      %~dp0
+echo.
+echo  Please ensure the entire project folder [including the src
+echo  directory] was extracted or cloned completely.
+echo ======================================================================
+echo.
+pause
+exit /b 1
 
 :missing_binaries
 cls
@@ -27,7 +46,7 @@ set /p INSTALL_CHOICE="  Would you like to automatically download them now? [Y/N
 if /i not "%INSTALL_CHOICE%"=="Y" goto :skip_download
 
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\setup.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\setup.ps1" -BinDir "%~dp0bin"
 if errorlevel 1 (
     echo.
     echo [!] Download failed. Please check your internet connection.
@@ -43,7 +62,7 @@ echo.
 
 :run_app
 if exist "%~dp0bin\node.exe" (
-    "%~dp0bin\node.exe" src\index.js %*
+    "%~dp0bin\node.exe" "%~dp0src\index.js" %*
     goto :end
 )
 
@@ -57,7 +76,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-node src\index.js %*
+node "%~dp0src\index.js" %*
 
 :end
 if errorlevel 1 (
