@@ -88,8 +88,8 @@ export class App {
         this.onStatusChange(`Peer left. Total peers: ${total}`);
         this._checkAllPeersReady();
       });
-      this.sync.on('peer-ready', () => {
-        this._checkAllPeersReady();
+      this.sync.on('peer-ready', ({ peer }) => {
+        this._checkAllPeersReady(peer);
       });
       this.sync.on('peer-buffer-stall', async ({ peerCountStalled }) => {
         await this._handlePeerBufferStall(peerCountStalled);
@@ -125,8 +125,15 @@ export class App {
         await this._loadTrackLocally(track, 0);
       });
 
-      this.sync.on('start-playback', async ({ startAt }) => {
-        const delay = Math.max(0, (startAt || Date.now()) - Date.now());
+      this.sync.on('start-playback', async ({ startAt, timePos }) => {
+        const serverNow = this.sync.getServerTime ? this.sync.getServerTime() : Date.now();
+        const targetTime = startAt || serverNow;
+        const delay = Math.max(0, Math.min(5000, targetTime - serverNow));
+
+        if (typeof timePos === 'number' && timePos > 0) {
+          await this.mpv.seek(timePos);
+        }
+
         setTimeout(async () => {
           this._suppressSyncBroadcast = true;
           this.userPaused = false;
@@ -240,8 +247,19 @@ export class App {
     }
   }
 
-  _checkAllPeersReady() {
+  _checkAllPeersReady(newlyReadyPeer = null) {
     if (!this.isHost || !this.hostReady) return;
+
+    // Late joiner handling: if host is already actively playing, release this peer directly at live position
+    if (this.currentTrack && !this.mpv.state.paused && this.mpv.state.timePos > 0) {
+      if (newlyReadyPeer) {
+        const leadTime = 350;
+        const startAt = Date.now() + leadTime;
+        const targetPos = this.mpv.state.timePos + (leadTime / 1000);
+        this.sync.startPlaybackForPeer(newlyReadyPeer, startAt, targetPos);
+      }
+      return;
+    }
 
     const totalPeers = this.sync.peers.size;
     const readyCount = this.sync.readyPeers.size;
@@ -268,7 +286,8 @@ export class App {
       return;
     }
 
-    const startAt = Date.now() + 250;
+    const leadTime = 350;
+    const startAt = Date.now() + leadTime;
     this.sync.startPlayback(startAt);
 
     setTimeout(async () => {
@@ -276,7 +295,7 @@ export class App {
         await this.mpv.play();
         this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
       }
-    }, 250);
+    }, leadTime);
   }
 
   async _handleBufferStateChange(isStalled) {

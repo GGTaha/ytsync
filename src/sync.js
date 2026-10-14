@@ -188,6 +188,13 @@ export class HostSync extends EventEmitter {
     });
   }
 
+  startPlaybackForPeer(peerSocket, startAt, timePos) {
+    sendJson(peerSocket, {
+      type: 'START_PLAYBACK',
+      payload: { startAt, timePos }
+    });
+  }
+
   updatePlay(timePos) {
     this.state.paused = false;
     this.state.timePos = timePos;
@@ -246,11 +253,13 @@ export class ClientSync extends EventEmitter {
     super();
     this.host = options.host || '127.0.0.1';
     this.port = options.port || 4455;
+    this.now = options.now || (() => Date.now());
     this.socket = null;
     this.connected = false;
     this.reconnectTimer = null;
     this.shouldReconnect = true;
     this.pingMs = 0;
+    this.serverClockOffset = 0;
     this.pingTimer = null;
   }
 
@@ -282,14 +291,20 @@ export class ClientSync extends EventEmitter {
   }
 
   _startPing() {
-    this.pingTimer = setInterval(() => {
+    const sendPing = () => {
       if (this.connected) {
         sendJson(this.socket, {
           type: 'PING',
-          clientTime: Date.now()
+          clientTime: this.now()
         });
       }
-    }, 5000);
+    };
+    sendPing(); // Ping immediately on connect
+    this.pingTimer = setInterval(sendPing, 5000);
+  }
+
+  getServerTime() {
+    return this.now() + this.serverClockOffset;
   }
 
   _handleServerMessage(msg) {
@@ -321,8 +336,14 @@ export class ClientSync extends EventEmitter {
         this.emit('heartbeat', msg.payload);
         break;
       case 'PONG': {
-        const rtt = Date.now() - msg.clientTime;
+        const now = this.now();
+        const rtt = Math.max(0, now - (msg.clientTime || now));
         this.pingMs = rtt;
+        if (typeof msg.serverTime === 'number') {
+          // NTP/Christian's clock offset formula: serverNow estimate = serverTime + (rtt / 2)
+          const estimatedServerNow = msg.serverTime + (rtt / 2);
+          this.serverClockOffset = estimatedServerNow - now;
+        }
         this.emit('ping', rtt);
         break;
       }
