@@ -11,7 +11,7 @@ export class App {
     this.mpvBinary = options.mpvBinary || 'mpv';
     this.ytdlpBinary = options.ytdlpBinary || 'yt-dlp';
 
-    this.mpv = new MpvController({ mpvBinary: this.mpvBinary });
+    this.mpv = new MpvController({ mpvBinary: this.mpvBinary, ytdlpBinary: this.ytdlpBinary });
     this.youtube = new YouTubeService({ ytdlpBinary: this.ytdlpBinary });
 
     this.sync = null;
@@ -33,6 +33,9 @@ export class App {
     this.lastAutoSeekTime = 0;
     this.hostReady = false;
     this.startPlaybackTimeout = null;
+    this.userPaused = false;
+    this.hostStalled = false;
+    this.peerStalledCount = 0;
   }
 
   async init() {
@@ -41,8 +44,17 @@ export class App {
 
     // 2. Setup MPV listeners
     this.mpv.on('end-file', (reason) => {
-      if (reason === 'eof' && this.isHost) {
-        this.nextTrack();
+      if (this.isHost) {
+        if (reason === 'eof') {
+          this.nextTrack();
+        } else if (reason === 'error') {
+          this.onStatusChange(`Error playing "${this.currentTrack?.title || 'track'}". Skipping...`);
+          setTimeout(() => this.nextTrack(), 1500);
+        }
+      } else {
+        if (reason === 'error') {
+          this.onStatusChange(`Stream error for "${this.currentTrack?.title || 'track'}".`);
+        }
       }
     });
 
@@ -74,12 +86,13 @@ export class App {
       this.sync.on('peer-disconnected', ({ total }) => {
         this.peerCount = total;
         this.onStatusChange(`Peer left. Total peers: ${total}`);
+        this._checkAllPeersReady();
       });
       this.sync.on('peer-ready', () => {
         this._checkAllPeersReady();
       });
-      this.sync.on('peer-buffer-stall', async ({ stalled }) => {
-        await this._handlePeerBufferStall(stalled);
+      this.sync.on('peer-buffer-stall', async ({ peerCountStalled }) => {
+        await this._handlePeerBufferStall(peerCountStalled);
       });
       this.sync.on('action', ({ action, payload }) => {
         this._handlePeerAction(action, payload);
@@ -116,6 +129,7 @@ export class App {
         const delay = Math.max(0, (startAt || Date.now()) - Date.now());
         setTimeout(async () => {
           this._suppressSyncBroadcast = true;
+          this.userPaused = false;
           await this.mpv.play();
           this._suppressSyncBroadcast = false;
           this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
@@ -124,6 +138,7 @@ export class App {
 
       this.sync.on('play', async () => {
         this._suppressSyncBroadcast = true;
+        this.userPaused = false;
         await this.mpv.play();
         this._suppressSyncBroadcast = false;
         this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
@@ -131,6 +146,7 @@ export class App {
 
       this.sync.on('pause', async ({ timePos }) => {
         this._suppressSyncBroadcast = true;
+        this.userPaused = true;
         await this.mpv.pause();
         if (typeof timePos === 'number' && Math.abs(this.mpv.state.timePos - timePos) > 0.5) {
           await this.mpv.seek(timePos);
@@ -182,6 +198,9 @@ export class App {
     }
 
     this.currentTrack = track;
+    this.userPaused = false;
+    this.hostStalled = false;
+    this.peerStalledCount = 0;
     this.lastTrackLoadTime = Date.now();
     this.onStatusChange(`Resolving stream: ${track.title}...`);
 
@@ -244,21 +263,31 @@ export class App {
     if (this.startPlaybackTimeout) clearTimeout(this.startPlaybackTimeout);
     this.startPlaybackTimeout = null;
 
+    if (this.userPaused) {
+      this.onStatusChange(`Buffered: ${this.currentTrack?.title || ''} (paused)`);
+      return;
+    }
+
     const startAt = Date.now() + 250;
     this.sync.startPlayback(startAt);
 
     setTimeout(async () => {
-      await this.mpv.play();
-      this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
+      if (!this.userPaused) {
+        await this.mpv.play();
+        this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
+      }
     }, 250);
   }
 
   async _handleBufferStateChange(isStalled) {
     if (!this.currentTrack || this.mpv.state.idle) return;
 
+    this.hostStalled = isStalled;
+
     if (isStalled) {
       if (this.isHost) {
-        await this.togglePlayPause(true);
+        await this.mpv.pause();
+        this.sync.updatePause(this.mpv.state.timePos);
         this.onStatusChange('Buffering audio stream (paused)...');
       } else {
         this.sync.sendBufferStall(true);
@@ -266,8 +295,15 @@ export class App {
       }
     } else {
       if (this.isHost) {
-        await this.togglePlayPause(false);
-        this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
+        if (!this.userPaused && this.peerStalledCount === 0) {
+          await this.mpv.play();
+          this.sync.updatePlay(this.mpv.state.timePos);
+          this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
+        } else if (this.userPaused) {
+          this.onStatusChange('Buffer ready (paused).');
+        } else {
+          this.onStatusChange(`Waiting for peers to buffer (${this.peerStalledCount} lagging)...`);
+        }
       } else {
         this.sync.sendBufferStall(false);
         this.onStatusChange('Buffer ready.');
@@ -275,14 +311,24 @@ export class App {
     }
   }
 
-  async _handlePeerBufferStall(stalled) {
+  async _handlePeerBufferStall(peerCountStalled) {
     if (!this.isHost || !this.currentTrack) return;
-    if (stalled) {
-      await this.togglePlayPause(true);
-      this.onStatusChange('Peer is buffering stream (paused)...');
+    this.peerStalledCount = peerCountStalled;
+
+    if (peerCountStalled > 0) {
+      if (!this.mpv.state.paused) {
+        await this.mpv.pause();
+        this.sync.updatePause(this.mpv.state.timePos);
+      }
+      this.onStatusChange(`Peer buffering stream (${peerCountStalled} peer(s))...`);
     } else {
-      await this.togglePlayPause(false);
-      this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
+      if (!this.userPaused && !this.hostStalled) {
+        await this.mpv.play();
+        this.sync.updatePlay(this.mpv.state.timePos);
+        this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
+      } else if (this.userPaused) {
+        this.onStatusChange('Peers buffered (paused).');
+      }
     }
   }
 
@@ -327,6 +373,11 @@ export class App {
   async playTrack(track) {
     if (!this.isHost) return;
 
+    if (this.startPlaybackTimeout) {
+      clearTimeout(this.startPlaybackTimeout);
+      this.startPlaybackTimeout = null;
+    }
+
     if (!track) {
       this.currentTrack = null;
       await this.mpv.stop();
@@ -337,6 +388,9 @@ export class App {
 
     this.currentTrack = track;
     this.hostReady = false;
+    this.userPaused = false;
+    this.hostStalled = false;
+    this.peerStalledCount = 0;
     this.sync.updateTrack(track);
     await this._loadTrackLocally(track, 0);
   }
@@ -361,6 +415,7 @@ export class App {
 
   async togglePlayPause(forcePause = null) {
     const shouldPause = forcePause !== null ? forcePause : !this.mpv.state.paused;
+    this.userPaused = shouldPause;
 
     if (!this.isHost) {
       this.sync.sendAction(shouldPause ? 'PAUSE' : 'PLAY', { timePos: this.mpv.state.timePos });

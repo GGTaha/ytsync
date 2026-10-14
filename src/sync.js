@@ -41,6 +41,7 @@ export class HostSync extends EventEmitter {
     this.server = null;
     this.peers = new Set();
     this.readyPeers = new Set();
+    this.stalledPeers = new Set();
     this.peerCount = 0;
 
     this.state = {
@@ -74,8 +75,12 @@ export class HostSync extends EventEmitter {
         socket.on('close', () => {
           this.peers.delete(socket);
           this.readyPeers.delete(socket);
+          const wasStalled = this.stalledPeers.delete(socket);
           this.peerCount = this.peers.size;
           this.emit('peer-disconnected', { address: socket.remoteAddress, total: this.peerCount });
+          if (wasStalled) {
+            this.emit('peer-buffer-stall', { peerCountStalled: this.stalledPeers.size });
+          }
         });
 
         socket.on('error', () => {
@@ -124,7 +129,13 @@ export class HostSync extends EventEmitter {
         break;
       }
       case 'BUFFER_STALL': {
-        this.emit('peer-buffer-stall', { peer: senderSocket, stalled: msg.payload?.stalled ?? true });
+        const isStalled = msg.payload?.stalled ?? true;
+        if (isStalled) {
+          this.stalledPeers.add(senderSocket);
+        } else {
+          this.stalledPeers.delete(senderSocket);
+        }
+        this.emit('peer-buffer-stall', { peerCountStalled: this.stalledPeers.size });
         break;
       }
       case 'PING': {
@@ -218,6 +229,8 @@ export class HostSync extends EventEmitter {
       peer.destroy();
     }
     this.peers.clear();
+    this.readyPeers.clear();
+    this.stalledPeers.clear();
     if (this.server) {
       this.server.close();
       this.server = null;

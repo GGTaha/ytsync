@@ -7,6 +7,7 @@ export class MpvController extends EventEmitter {
   constructor(options = {}) {
     super();
     this.mpvBinary = options.mpvBinary || 'mpv';
+    this.ytdlpBinary = options.ytdlpBinary || null;
     this.pipeName = `\\\\.\\pipe\\ytsync_mpv_${crypto.randomBytes(4).toString('hex')}`;
     this.process = null;
     this.socket = null;
@@ -38,8 +39,13 @@ export class MpvController extends EventEmitter {
         '--demuxer-readahead-secs=60',
         '--demuxer-max-bytes=64M',
         '--speed=1.0',
+        '--ytdl=yes',
         `--input-ipc-server=${this.pipeName}`
       ];
+
+      if (this.ytdlpBinary) {
+        args.push(`--script-opts=ytdl_hook-ytdl_path=${this.ytdlpBinary}`);
+      }
 
       this.process = spawn(this.mpvBinary, args, {
         windowsHide: true,

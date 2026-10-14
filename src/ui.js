@@ -30,6 +30,13 @@ export class TerminalUI {
       this.render();
     }, 150);
 
+    if (process.stdout.isTTY) {
+      process.stdout.on('resize', () => {
+        process.stdout.write('\x1B[2J\x1B[H');
+        this.render();
+      });
+    }
+
     process.on('SIGINT', () => this.cleanup(true));
     process.on('SIGTERM', () => this.cleanup(true));
     process.on('SIGHUP', () => this.cleanup(true));
@@ -196,15 +203,28 @@ export class TerminalUI {
       // 1. Direct URL or Video ID check
       if (this.app.youtube.isUrlOrId(query)) {
         this.resetInput();
+        this.setStatus('Resolving video details...');
         const url = this.app.youtube.toWatchUrl(query);
         const id = this.app.youtube.extractVideoId(query) || 'custom';
-        const track = {
+        let track = {
           id,
           title: `YouTube (${id})`,
           channel: 'YouTube',
           duration: 0,
           url: url
         };
+        try {
+          const info = await this.app.resolveVideo(url);
+          if (info && info.title) {
+            track = {
+              id: info.id || id,
+              title: info.title,
+              channel: info.channel || 'YouTube',
+              duration: info.duration || 0,
+              url: info.url || url
+            };
+          }
+        } catch {}
         await this.app.enqueueOrPlay(track);
         return;
       }

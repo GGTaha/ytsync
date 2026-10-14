@@ -39,13 +39,15 @@ export class YouTubeService {
       '--flat-playlist',
       '--dump-json',
       '--no-warnings',
-      '--ignore-errors'
+      '--ignore-errors',
+      '--force-ipv4'
     ];
 
     try {
       const { stdout } = await execFileAsync(this.ytdlpBinary, args, {
         windowsHide: true,
-        maxBuffer: 10 * 1024 * 1024
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 15000
       });
 
       const lines = stdout.trim().split('\n');
@@ -85,13 +87,15 @@ export class YouTubeService {
       '--dump-json',
       '-f', 'ba/b',
       '--no-playlist',
-      '--no-warnings'
+      '--no-warnings',
+      '--force-ipv4'
     ];
 
     try {
       const { stdout } = await execFileAsync(this.ytdlpBinary, args, {
         windowsHide: true,
-        maxBuffer: 10 * 1024 * 1024
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 15000
       });
 
       const data = JSON.parse(stdout);
@@ -119,14 +123,20 @@ export class YouTubeService {
       '-g',
       '-f', 'ba/b',
       '--no-playlist',
-      '--no-warnings'
+      '--no-warnings',
+      '--force-ipv4'
     ];
 
     try {
       const { stdout } = await execFileAsync(this.ytdlpBinary, args, {
-        windowsHide: true
+        windowsHide: true,
+        timeout: 15000
       });
-      return stdout.trim().split('\n')[0];
+      const streamUrl = stdout.trim().split('\n')[0];
+      if (streamUrl && streamUrl.startsWith('http')) {
+        return streamUrl;
+      }
+      return url;
     } catch {
       return url;
     }
