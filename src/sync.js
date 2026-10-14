@@ -40,6 +40,7 @@ export class HostSync extends EventEmitter {
     this.host = options.host || '0.0.0.0';
     this.server = null;
     this.peers = new Set();
+    this.readyPeers = new Set();
     this.peerCount = 0;
 
     this.state = {
@@ -72,6 +73,7 @@ export class HostSync extends EventEmitter {
 
         socket.on('close', () => {
           this.peers.delete(socket);
+          this.readyPeers.delete(socket);
           this.peerCount = this.peers.size;
           this.emit('peer-disconnected', { address: socket.remoteAddress, total: this.peerCount });
         });
@@ -116,6 +118,15 @@ export class HostSync extends EventEmitter {
         this.emit('action', { action, payload, fromPeer: true });
         break;
       }
+      case 'TRACK_READY': {
+        this.readyPeers.add(senderSocket);
+        this.emit('peer-ready', { peer: senderSocket, readyCount: this.readyPeers.size, totalPeers: this.peers.size });
+        break;
+      }
+      case 'BUFFER_STALL': {
+        this.emit('peer-buffer-stall', { peer: senderSocket, stalled: msg.payload?.stalled ?? true });
+        break;
+      }
       case 'PING': {
         sendJson(senderSocket, {
           type: 'PONG',
@@ -150,9 +161,19 @@ export class HostSync extends EventEmitter {
     const cleanTrack = this._sanitizeTrack(track);
     this.state.currentTrack = cleanTrack;
     this.state.timePos = 0;
+    this.state.paused = true;
+    this.readyPeers.clear();
     this.broadcast({
       type: 'LOAD_TRACK',
       payload: cleanTrack
+    });
+  }
+
+  startPlayback(startAt) {
+    this.state.paused = false;
+    this.broadcast({
+      type: 'START_PLAYBACK',
+      payload: { startAt }
     });
   }
 
@@ -268,6 +289,9 @@ export class ClientSync extends EventEmitter {
       case 'LOAD_TRACK':
         this.emit('load-track', msg.payload);
         break;
+      case 'START_PLAYBACK':
+        this.emit('start-playback', msg.payload);
+        break;
       case 'PLAY':
         this.emit('play', msg.payload);
         break;
@@ -289,6 +313,18 @@ export class ClientSync extends EventEmitter {
         this.emit('ping', rtt);
         break;
       }
+    }
+  }
+
+  sendTrackReady() {
+    if (this.connected) {
+      sendJson(this.socket, { type: 'TRACK_READY' });
+    }
+  }
+
+  sendBufferStall(stalled) {
+    if (this.connected) {
+      sendJson(this.socket, { type: 'BUFFER_STALL', payload: { stalled } });
     }
   }
 

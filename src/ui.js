@@ -66,7 +66,7 @@ export class TerminalUI {
   }
 
   render() {
-    const { isHost, currentTrack, timePos, duration, paused, idle, volume, queue, peerCount, pingMs, hostAddress } = this.app.getState();
+    const { isHost, currentTrack, timePos, duration, paused, idle, pausedForCache, volume, queue, peerCount, pingMs, hostAddress } = this.app.getState();
 
     let out = '\x1B[H'; // Move to top-left
 
@@ -84,7 +84,12 @@ export class TerminalUI {
 
     // Now Playing section
     if (currentTrack) {
-      const statusIcon = paused ? '\x1B[33m⏸ PAUSED\x1B[0m' : idle ? '\x1B[36m⏳ BUFFERING\x1B[0m' : '\x1B[32m▶ PLAYING\x1B[0m';
+      const isBuffering = idle || pausedForCache || (duration === 0 && !paused);
+      const statusIcon = isBuffering
+        ? '\x1B[36m⏳ BUFFERING\x1B[0m'
+        : paused
+        ? '\x1B[33m⏸ PAUSED\x1B[0m'
+        : '\x1B[32m▶ PLAYING\x1B[0m';
       const title = currentTrack.title.length > 55 ? currentTrack.title.slice(0, 52) + '...' : currentTrack.title;
       const channel = currentTrack.channel ? (currentTrack.channel.length > 40 ? currentTrack.channel.slice(0, 37) + '...' : currentTrack.channel) : 'YouTube';
 

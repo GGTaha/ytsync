@@ -31,6 +31,8 @@ export class App {
     this._suppressSyncBroadcast = false;
     this.lastTrackLoadTime = 0;
     this.lastAutoSeekTime = 0;
+    this.hostReady = false;
+    this.startPlaybackTimeout = null;
   }
 
   async init() {
@@ -57,6 +59,10 @@ export class App {
       }
     });
 
+    this.mpv.on('paused-for-cache', async (isStalled) => {
+      await this._handleBufferStateChange(isStalled);
+    });
+
     // 3. Setup Sync
     if (this.isHost) {
       this.discovery = startHostDiscovery(this.port);
@@ -68,6 +74,12 @@ export class App {
       this.sync.on('peer-disconnected', ({ total }) => {
         this.peerCount = total;
         this.onStatusChange(`Peer left. Total peers: ${total}`);
+      });
+      this.sync.on('peer-ready', () => {
+        this._checkAllPeersReady();
+      });
+      this.sync.on('peer-buffer-stall', async ({ stalled }) => {
+        await this._handlePeerBufferStall(stalled);
       });
       this.sync.on('action', ({ action, payload }) => {
         this._handlePeerAction(action, payload);
@@ -92,30 +104,39 @@ export class App {
       this.sync.on('room-state', async (state) => {
         this.queue = state.queue || [];
         if (state.currentTrack) {
-          await this._loadTrackLocally(state.currentTrack, state.timePos, state.paused);
+          await this._loadTrackLocally(state.currentTrack, state.timePos);
         }
       });
 
       this.sync.on('load-track', async (track) => {
-        await this._loadTrackLocally(track, 0, false);
+        await this._loadTrackLocally(track, 0);
       });
 
-      this.sync.on('play', async ({ timePos }) => {
+      this.sync.on('start-playback', async ({ startAt }) => {
+        const delay = Math.max(0, (startAt || Date.now()) - Date.now());
+        setTimeout(async () => {
+          this._suppressSyncBroadcast = true;
+          await this.mpv.play();
+          this._suppressSyncBroadcast = false;
+          this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
+        }, delay);
+      });
+
+      this.sync.on('play', async () => {
         this._suppressSyncBroadcast = true;
         await this.mpv.play();
-        if (typeof timePos === 'number' && Math.abs(this.mpv.state.timePos - timePos) > 1.0) {
-          await this.mpv.seek(timePos);
-        }
         this._suppressSyncBroadcast = false;
+        this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
       });
 
       this.sync.on('pause', async ({ timePos }) => {
         this._suppressSyncBroadcast = true;
         await this.mpv.pause();
-        if (typeof timePos === 'number' && Math.abs(this.mpv.state.timePos - timePos) > 1.0) {
+        if (typeof timePos === 'number' && Math.abs(this.mpv.state.timePos - timePos) > 0.5) {
           await this.mpv.seek(timePos);
         }
         this._suppressSyncBroadcast = false;
+        this.onStatusChange(`Paused: ${this.currentTrack?.title || ''}`);
       });
 
       this.sync.on('seek', async ({ timePos }) => {
@@ -131,28 +152,18 @@ export class App {
       this.sync.on('heartbeat', async ({ timePos, paused }) => {
         if (!this.currentTrack || this.mpv.state.idle) return;
 
-        // 1. Never interrupt the initial 6-second buffering window of a track
-        const now = Date.now();
-        if (now - this.lastTrackLoadTime < 6000) {
-          return;
-        }
-
-        // 2. Cooldown: do not issue repeated seeks within 5 seconds
-        if (now - this.lastAutoSeekTime < 5000) {
-          return;
-        }
-
-        // 3. Align pause states
+        // 1. Align pause states
         if (this.mpv.state.paused !== paused) {
           if (paused) await this.mpv.pause();
           else await this.mpv.play();
         }
 
-        // 4. Drift correction: only if both sides have active rolling audio (> 0.5s) and drift > 2.5s
-        if (!paused && !this.mpv.state.paused && this.mpv.state.timePos > 0.5 && timePos > 0.5) {
-          const drift = Math.abs(this.mpv.state.timePos - timePos);
-          if (drift > 2.5) {
-            this.lastAutoSeekTime = now;
+        // 2. STRICT NO-SEEK RULE DURING ACTIVE PLAYBACK:
+        // Position alignment ONLY happens while PAUSED!
+        // Never seek, skip, speed up, or slow down during active playback!
+        if (paused && this.mpv.state.paused && typeof timePos === 'number') {
+          const diff = Math.abs(this.mpv.state.timePos - timePos);
+          if (diff > 0.5) {
             await this.mpv.seek(timePos);
           }
         }
@@ -162,7 +173,7 @@ export class App {
     }
   }
 
-  async _loadTrackLocally(track, startPos = 0, paused = false) {
+  async _loadTrackLocally(track, startPos = 0) {
     if (!track) {
       this.currentTrack = null;
       await this.mpv.stop();
@@ -172,26 +183,106 @@ export class App {
 
     this.currentTrack = track;
     this.lastTrackLoadTime = Date.now();
-    this.lastAutoSeekTime = Date.now();
-    this.onStatusChange(`Loading: ${track.title}...`);
+    this.onStatusChange(`Resolving stream: ${track.title}...`);
 
     try {
-      const url = track.url || (track.id ? `https://www.youtube.com/watch?v=${track.id}` : null);
-      if (!url) return;
+      const target = track.url || (track.id ? `https://www.youtube.com/watch?v=${track.id}` : null);
+      if (!target) return;
 
-      await this.mpv.loadFile(url);
+      // 1. Resolve local audio stream URL
+      const streamUrl = await this.youtube.getAudioStreamUrl(target);
+
+      this.onStatusChange(`Buffering: ${track.title}...`);
+
+      // 2. Pause MPV before loading so it pre-buffers into RAM without playing yet
+      await this.mpv.pause();
+
+      // 3. Load direct stream
+      await this.mpv.loadFile(streamUrl);
+
+      // 4. Wait for MPV to finish demuxing headers and duration
+      await this.mpv.waitUntilLoaded(14000);
 
       if (startPos > 0) {
         await this.mpv.seek(startPos);
       }
-      if (paused) {
-        await this.mpv.pause();
+
+      // 5. Signal readiness
+      if (this.isHost) {
+        this.hostReady = true;
+        this.onStatusChange(`Buffered: ${track.title}`);
+        this._checkAllPeersReady();
       } else {
-        await this.mpv.play();
+        this.sync.sendTrackReady();
+        this.onStatusChange(`Buffered. Syncing start with host...`);
       }
-      this.onStatusChange(`Playing: ${track.title}`);
     } catch (err) {
       this.onStatusChange(`Playback error: ${err.message}`);
+    }
+  }
+
+  _checkAllPeersReady() {
+    if (!this.isHost || !this.hostReady) return;
+
+    const totalPeers = this.sync.peers.size;
+    const readyCount = this.sync.readyPeers.size;
+
+    if (readyCount >= totalPeers) {
+      this._releasePlayback();
+    } else {
+      this.onStatusChange(`Waiting for peers to buffer (${readyCount}/${totalPeers})...`);
+      if (this.startPlaybackTimeout) clearTimeout(this.startPlaybackTimeout);
+      this.startPlaybackTimeout = setTimeout(() => {
+        if (this.currentTrack && this.mpv.state.paused) {
+          this._releasePlayback();
+        }
+      }, 8000);
+    }
+  }
+
+  _releasePlayback() {
+    if (this.startPlaybackTimeout) clearTimeout(this.startPlaybackTimeout);
+    this.startPlaybackTimeout = null;
+
+    const startAt = Date.now() + 250;
+    this.sync.startPlayback(startAt);
+
+    setTimeout(async () => {
+      await this.mpv.play();
+      this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
+    }, 250);
+  }
+
+  async _handleBufferStateChange(isStalled) {
+    if (!this.currentTrack || this.mpv.state.idle) return;
+
+    if (isStalled) {
+      if (this.isHost) {
+        await this.togglePlayPause(true);
+        this.onStatusChange('Buffering audio stream (paused)...');
+      } else {
+        this.sync.sendBufferStall(true);
+        this.onStatusChange('Buffering audio stream...');
+      }
+    } else {
+      if (this.isHost) {
+        await this.togglePlayPause(false);
+        this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
+      } else {
+        this.sync.sendBufferStall(false);
+        this.onStatusChange('Buffer ready.');
+      }
+    }
+  }
+
+  async _handlePeerBufferStall(stalled) {
+    if (!this.isHost || !this.currentTrack) return;
+    if (stalled) {
+      await this.togglePlayPause(true);
+      this.onStatusChange('Peer is buffering stream (paused)...');
+    } else {
+      await this.togglePlayPause(false);
+      this.onStatusChange(`Playing: ${this.currentTrack?.title || ''}`);
     }
   }
 
@@ -245,8 +336,9 @@ export class App {
     }
 
     this.currentTrack = track;
+    this.hostReady = false;
     this.sync.updateTrack(track);
-    await this._loadTrackLocally(track, 0, false);
+    await this._loadTrackLocally(track, 0);
   }
 
   async nextTrack() {
@@ -323,12 +415,17 @@ export class App {
       duration: this.mpv.state.duration,
       paused: this.mpv.state.paused,
       idle: this.mpv.state.idle,
+      pausedForCache: this.mpv.state.pausedForCache,
       volume: this.mpv.state.volume,
       queue: this.queue
     };
   }
 
   destroy() {
+    if (this.startPlaybackTimeout) {
+      clearTimeout(this.startPlaybackTimeout);
+      this.startPlaybackTimeout = null;
+    }
     if (this.discovery) {
       this.discovery.close();
     }

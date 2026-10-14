@@ -22,7 +22,9 @@ export class MpvController extends EventEmitter {
       paused: false,
       title: '',
       idle: true,
-      volume: 100
+      volume: 100,
+      pausedForCache: false,
+      cacheDuration: 0
     };
   }
 
@@ -32,10 +34,10 @@ export class MpvController extends EventEmitter {
         '--idle=yes',
         '--no-video',
         '--terminal=no',
-        '--ytdl-format=bestaudio/best',
         '--cache=yes',
         '--demuxer-readahead-secs=60',
-        '--demuxer-max-bytes=32M',
+        '--demuxer-max-bytes=64M',
+        '--speed=1.0',
         `--input-ipc-server=${this.pipeName}`
       ];
 
@@ -149,6 +151,18 @@ export class MpvController extends EventEmitter {
             this.emit('idle', msg.data);
           }
           break;
+        case 'paused-for-cache':
+          if (typeof msg.data === 'boolean') {
+            this.state.pausedForCache = msg.data;
+            this.emit('paused-for-cache', msg.data);
+          }
+          break;
+        case 'demuxer-cache-duration':
+          if (typeof msg.data === 'number') {
+            this.state.cacheDuration = msg.data;
+            this.emit('cache-duration', msg.data);
+          }
+          break;
       }
     } else if (msg.event === 'end-file') {
       this.emit('end-file', msg.reason);
@@ -174,13 +188,59 @@ export class MpvController extends EventEmitter {
     await this.sendCommand(['observe_property', 3, 'pause']).catch(() => {});
     await this.sendCommand(['observe_property', 4, 'media-title']).catch(() => {});
     await this.sendCommand(['observe_property', 5, 'idle-active']).catch(() => {});
+    await this.sendCommand(['observe_property', 6, 'paused-for-cache']).catch(() => {});
+    await this.sendCommand(['observe_property', 7, 'demuxer-cache-duration']).catch(() => {});
   }
 
   async loadFile(url) {
     this.state.timePos = 0;
     this.state.duration = 0;
-    this.state.paused = false;
+    this.state.pausedForCache = false;
+    this.state.cacheDuration = 0;
     return this.sendCommand(['loadfile', url, 'replace']);
+  }
+
+  async waitUntilLoaded(timeoutMs = 15000) {
+    if (!this.state.idle && (this.state.duration > 0 || this.state.cacheDuration > 0.5)) {
+      return true;
+    }
+
+    return new Promise((resolve) => {
+      let done = false;
+
+      const check = () => {
+        if (!done && !this.state.idle && (this.state.duration > 0 || this.state.cacheDuration > 0.5)) {
+          done = true;
+          cleanup();
+          resolve(true);
+        }
+      };
+
+      const onDuration = () => check();
+      const onCache = () => check();
+      const onIdle = () => check();
+
+      this.on('duration', onDuration);
+      this.on('cache-duration', onCache);
+      this.on('idle', onIdle);
+
+      const timer = setTimeout(() => {
+        if (!done) {
+          done = true;
+          cleanup();
+          resolve(!this.state.idle);
+        }
+      }, timeoutMs);
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.removeListener('duration', onDuration);
+        this.removeListener('cache-duration', onCache);
+        this.removeListener('idle', onIdle);
+      };
+
+      check();
+    });
   }
 
   async play() {
